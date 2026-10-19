@@ -161,6 +161,16 @@ Returns the number of keys `wallet` holds for `creator`.
 
 ---
 
+### `get_holder_registry(key_id: Address) → Vec<Address>`
+
+Returns the append-only list of wallet addresses that have held keys for `key_id`.
+An address remains in the list after its balance reaches zero, and subsequent
+purchases or transfers do not add duplicate entries. Keys without a registry
+return an empty vector. Reads of an existing registry extend its persistent
+storage TTL.
+
+---
+
 ### `get_holder_key_count(creator: Address, holder: Address) → HolderKeyCountView`
 
 Returns a struct view of a holder's key count.
@@ -326,6 +336,17 @@ Returns accrued creator fee balance for the creator's fee recipient after buy ex
 
 ---
 
+### `get_current_milestone(key_id: Address) → Result<(u32, u32), ContractError>`
+
+Returns the active graduated supply milestone tier and the fee currently in effect for `key_id` (#1076).
+
+- Returns `(tier, fee_bps)` where `tier` is the 1-based count of milestone tiers reached (`0` when none) and `fee_bps` is the fee in basis points currently in effect.
+- Tiers are applied in ascending supply order and the fee only ever moves downward, so a supply drop never raises the fee.
+- Returns `Err(ContractError::NotRegistered)` for unregistered keys.
+- Does not mutate state.
+
+---
+
 ### `is_protocol_config_initialized(env: Env) → bool`
 
 Returns `true` if a protocol fee configuration has been stored; `false` otherwise.
@@ -427,6 +448,55 @@ creator's `quorum_bps`, whether an extension would currently qualify
 plus participation of at least `threshold_bps` of that requirement.
 `exhausted` is `false` when escalation is disabled, which distinguishes "no
 configured budget" from "a spent budget".
+
+---
+
+## Trusted forwarder read methods
+
+### `get_nonce(wallet: Address) → u64`
+
+Returns the trusted-forwarder nonce for `wallet`, which is the `nonce` the wallet's next `forward_buy` must carry and sign.
+
+- Starts at `0` for wallets with no forwarded history.
+- Increases by exactly one after each successful `forward_buy`. A failed `forward_buy` reverts, so the nonce is unchanged.
+- Nonces are per wallet: one wallet's forwarded buys never change another's.
+- Stored in persistent storage under `DataKey::ForwarderNonce(wallet)`.
+
+**Edge cases:**
+- Never panics and requires no authorization. A wallet with no entry returns `0`.
+- When the entry exists, the read extends its TTL to the full `CREATOR_TTL_LEDGERS` window. When it does not exist, nothing is written and no TTL is touched, since there is no entry to extend (`extend_ttl` on a missing key traps).
+
+---
+
+## Price alert read methods
+
+### `get_alerts(wallet: Address) → Vec<PriceAlert>`
+
+Returns `wallet`'s active price alerts in registration order. Each `PriceAlert` carries `alert_id`, `wallet`, `key_id`, `direction` (`Above` / `Below`), `target_price` (raw `i128`, same units as the key price) and `created_ledger`.
+
+- Only active alerts are returned. An alert disappears from the result in the same transaction that fires it (`alert_trg`) or cancels it (`alert_cxl`).
+- At most `MAX_ACTIVE_ALERTS_PER_WALLET` (10) entries.
+
+**Edge cases:**
+- Never panics and requires no authorization. A wallet that never registered an alert returns an empty vector.
+- Read-only: references to alerts that have fired are filtered out here and only pruned from storage the next time the wallet calls `register_alert` or `cancel_alert`.
+
+---
+
+## LP reward read methods
+
+### `get_reward_rate(key_id: Address) → RewardRate`
+
+Returns the current reward rate and the timestamp at which it was last set for `key_id`'s LP pool.
+
+| Field | Type | Semantics |
+|---|---|---|
+| `rate_bps` | `u32` | Reward rate in basis points (e.g., `500` = 5.00%). Returns `0` if not set. |
+| `updated_at` | `u64` | Ledger timestamp (in seconds) of the last update. Returns `0` if not set. |
+
+**Edge cases:**
+- Never panics and requires no authorization.
+- Returns `{ rate_bps: 0, updated_at: 0 }` for any key where `set_reward_rate` has not been called, or if `key_id` is unregistered.
 
 ---
 
